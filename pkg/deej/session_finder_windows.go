@@ -27,6 +27,11 @@ type wcaSessionFinder struct {
 	// our master input and output sessions
 	masterOut *masterSession
 	masterIn  *masterSession
+
+	// monitor brightness sessions. unlike the audio ones these are built once and handed
+	// out again on every refresh: each owns a worker goroutine and the value deej last
+	// asked for, neither of which should be thrown away every time sessions are re-acquired
+	brightnessSessions []*brightnessSession
 }
 
 const (
@@ -144,7 +149,28 @@ func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
 		return nil, fmt.Errorf("enumerate device sessions: %w", err)
 	}
 
+	// make monitor brightness bindable the same way audio is
+	sf.addBrightnessSessions(&sessions)
+
 	return sessions, nil
+}
+
+// addBrightnessSessions builds the brightness sessions on first use and appends the same
+// instances on every later call. nothing here talks to the monitors, so it stays cheap
+// enough to sit in a path that a slider move can trigger
+func (sf *wcaSessionFinder) addBrightnessSessions(sessions *[]Session) {
+	if sf.brightnessSessions == nil {
+
+		// monitor numbers are 1-based, matching what --MonitorNum expects
+		for monitorNum := 1; monitorNum <= brightnessMonitorCount; monitorNum++ {
+			sf.brightnessSessions = append(sf.brightnessSessions,
+				newBrightnessSession(sf.sessionLogger, monitorNum))
+		}
+	}
+
+	for _, session := range sf.brightnessSessions {
+		*sessions = append(*sessions, session)
+	}
 }
 
 func (sf *wcaSessionFinder) Release() error {
@@ -152,6 +178,12 @@ func (sf *wcaSessionFinder) Release() error {
 	// skip unregistering the mmnotificationclient, as it's not implemented in go-wca
 	if sf.mmDeviceEnumerator != nil {
 		sf.mmDeviceEnumerator.Release()
+	}
+
+	// brightness sessions no-op their own Release so they survive session map refreshes,
+	// so this is the one place their workers actually get stopped
+	for _, session := range sf.brightnessSessions {
+		session.stop()
 	}
 
 	sf.logger.Debug("Released WCA session finder instance")
