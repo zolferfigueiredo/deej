@@ -74,13 +74,11 @@ func (sio *SerialIO) Start() error {
 		return errors.New("serial: connection already active")
 	}
 
-	// set minimum read size according to platform (0 for windows, 1 for linux)
-	// this prevents a rare bug on windows where serial reads get congested,
-	// resulting in significant lag
-	minimumReadSize := 0
-	if util.Linux() {
-		minimumReadSize = 1
-	}
+	// always block until at least one byte is available. with a minimum read size of 0,
+	// windows reads return (0, nil) immediately, so bufio gives up with io.ErrNoProgress
+	// after 100 of them - which takes well under a millisecond, long before the first
+	// byte lands after opening the port
+	minimumReadSize := 1
 
 	sio.connOptions = serial.OpenOptions{
 		PortName:        sio.deej.config.ConnectionInfo.COMPort,
@@ -210,8 +208,15 @@ func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) c
 					logger.Warnw("Failed to read line from serial", "error", err, "line", line)
 				}
 
-				// just ignore the line, the read loop will stop after this
-				return
+				// don't give up permanently on a read error - that would leave deej
+				// connected but deaf until restarted, producing no log output at all.
+				// only stop once the connection is actually closed
+				if !sio.connected {
+					return
+				}
+
+				time.Sleep(10 * time.Millisecond)
+				continue
 			}
 
 			if sio.deej.Verbose() {
